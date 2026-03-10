@@ -1,0 +1,27 @@
+[package]
+
+# Semantic Versioning is used: https://semver.org/
+version = "0.1.0"
+
+# Description
+category = "isaaclab"
+readme  = "README.md"
+
+title = "Custom G1 Standby Controller"
+author = "Jeff + Cursor"
+maintainer = "Jeff + Cursor"
+description="Custom Isaac Lab standby controller task for G1 full-body pose tracking with payload adaptation."
+repository = "local"
+keywords = ["isaaclab", "standby", "g1", "pose-tracking", "payload"]
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_mimic" = {}
+"isaaclab_rl" = {}
+"isaaclab_tasks" = {}
+
+[[python.module]]
+name = "custom_standby"
+
+[isaaclab_settings]

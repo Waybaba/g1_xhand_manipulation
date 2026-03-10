@@ -1,0 +1,330 @@
+"""Full-body pose command term for the standby controller.
+
+Generates random target joint positions for all 29 G1 body joints,
+with per-group offset ranges and OpenHomie-style exponential curriculum
+for the arm joints.  Legs are constrained to stay near the standing
+default; arms ramp up progressively.
+
+Wrist target positions are visualized as colored sphere markers
+(red = left, blue = right) via forward kinematics on the robot's
+current articulation data.
+"""
+
+from __future__ import annotations
+
+import math
+
+import torch
+from collections.abc import Sequence
+from dataclasses import MISSING, field
+from typing import TYPE_CHECKING
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation
+from isaaclab.managers import CommandTerm, CommandTermCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.utils import configclass
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedEnv
+
+
+def _sample_exponential_ratio(
+    ra: float,
+    shape: tuple[int, ...],
+    device: torch.device,
+) -> torch.Tensor:
+    """Sample ratios using OpenHomie's truncated exponential (Eq. 3).
+
+    At ``ra ~ 0`` samples concentrate near 0; at ``ra ~ 1`` the
+    distribution approaches ``U(0, 1)``.
+
+    Args:
+        ra: Curriculum ratio in ``[0, 1]``.
+        shape: Output tensor shape.
+        device: Torch device.
+
+    Returns:
+        torch.Tensor: Ratios in ``[0, 1]``.
+    """
+    ra_safe = min(ra, 0.99)
+    lam = 20.0 * (1.0 - ra_safe)
+    u = torch.rand(shape, device=device)
+    ratio = (-1.0 / lam) * torch.log(
+        1.0 - u * (1.0 - math.exp(-lam))
+    )
+    return ratio
+
+
+# ---------------------------------------------------------------------------
+# Visualization marker configs
+# ---------------------------------------------------------------------------
+_LEFT_WRIST_MARKER_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/LeftWristTarget",
+    markers={
+        "sphere": sim_utils.SphereCfg(
+            radius=0.04,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.2, 0.2),
+            ),
+        ),
+    },
+)
+
+_RIGHT_WRIST_MARKER_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/RightWristTarget",
+    markers={
+        "sphere": sim_utils.SphereCfg(
+            radius=0.04,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.2, 0.4, 1.0),
+            ),
+        ),
+    },
+)
+
+
+class BodyPoseCommand(CommandTerm):
+    """Command generating random body joint position targets.
+
+    Targets are split into three groups with independent offset ranges:
+
+    * **Legs** -- tight range near standing default for balance stability.
+    * **Waist** -- moderate range for torso posture variation.
+    * **Arms** -- OpenHomie exponential curriculum that ramps from zero
+      to the full ``arm_offset_range``.
+
+    New targets are linearly interpolated over ``interpolation_duration``
+    seconds.  Wrist FK positions are visualized as colored sphere markers.
+    """
+
+    cfg: "BodyPoseCommandCfg"
+
+    def __init__(self, cfg: "BodyPoseCommandCfg", env: ManagerBasedEnv):
+        """Initialize the body pose command.
+
+        Args:
+            cfg: Command term configuration.
+            env: The environment instance.
+        """
+        super().__init__(cfg, env)
+        self.robot: Articulation = env.scene[cfg.asset_name]
+
+        # Resolve joint indices per group
+        self._all_ids, self._all_names = self.robot.find_joints(cfg.joint_names)
+        self._num_cmd = len(self._all_ids)
+
+        self._leg_ids, _ = self.robot.find_joints(cfg.leg_joint_names)
+        self._waist_ids, _ = self.robot.find_joints(cfg.waist_joint_names)
+        self._arm_ids, _ = self.robot.find_joints(cfg.arm_joint_names)
+
+        # Remap to local indices within self._all_ids
+        all_set = list(self._all_ids)
+        self._leg_local = [all_set.index(i) for i in self._leg_ids]
+        self._waist_local = [all_set.index(i) for i in self._waist_ids]
+        self._arm_local = [all_set.index(i) for i in self._arm_ids]
+
+        self._default_pos = (
+            self.robot.data.default_joint_pos[0, self._all_ids].clone()
+        )
+
+        default_expanded = self._default_pos.unsqueeze(0).expand(
+            self.num_envs, -1
+        )
+        self._body_command = default_expanded.clone()
+        self._target_command = default_expanded.clone()
+
+        # Interpolation state
+        self._dt = self._env.step_dt
+        self._interp_steps = max(
+            1, int(cfg.interpolation_duration / self._dt)
+        )
+        self._delta = torch.zeros_like(self._body_command)
+        self._interp_remaining = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+
+        # Curriculum ratio for arms (advanced by external curriculum term)
+        self._curriculum_ratio: float = cfg.initial_ratio
+
+        self.metrics["error_body_pos"] = torch.zeros(
+            self.num_envs, device=self.device
+        )
+
+        # Resolve wrist body indices for FK visualization
+        self._left_wrist_idx = self.robot.find_bodies(
+            cfg.left_wrist_body_name
+        )[0][0]
+        self._right_wrist_idx = self.robot.find_bodies(
+            cfg.right_wrist_body_name
+        )[0][0]
+
+    def __str__(self) -> str:
+        """Return string representation."""
+        msg = "BodyPoseCommand:\n"
+        msg += f"\tJoints ({self._num_cmd}): {self._all_names}\n"
+        msg += f"\tLeg offset: {self.cfg.leg_offset_range}\n"
+        msg += f"\tWaist offset: {self.cfg.waist_offset_range}\n"
+        msg += f"\tArm offset: {self.cfg.arm_offset_range}\n"
+        msg += f"\tInterpolation: {self.cfg.interpolation_duration}s "
+        msg += f"({self._interp_steps} steps)\n"
+        msg += f"\tArm curriculum ratio: {self._curriculum_ratio:.2f}"
+        return msg
+
+    @property
+    def command(self) -> torch.Tensor:
+        """The body target tensor. Shape: ``(num_envs, num_cmd)``."""
+        return self._body_command
+
+    def _update_metrics(self):
+        """Track L1 error between actual and commanded body positions."""
+        error = torch.sum(
+            torch.abs(
+                self.robot.data.joint_pos[:, self._all_ids]
+                - self._body_command
+            ),
+            dim=1,
+        )
+        self.metrics["error_body_pos"] = error
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        """Sample new body targets with per-group offset ranges."""
+        n = len(env_ids)
+
+        # Start from defaults
+        targets = self._default_pos.unsqueeze(0).expand(n, -1).clone()
+
+        # --- Legs: small uniform offsets ---
+        lo, hi = self.cfg.leg_offset_range
+        leg_offsets = (hi - lo) * torch.rand(
+            n, len(self._leg_local), device=self.device
+        ) + lo
+        targets[:, self._leg_local] += leg_offsets
+
+        # --- Waist: moderate uniform offsets ---
+        lo, hi = self.cfg.waist_offset_range
+        waist_offsets = (hi - lo) * torch.rand(
+            n, len(self._waist_local), device=self.device
+        ) + lo
+        targets[:, self._waist_local] += waist_offsets
+
+        # --- Arms: OpenHomie exponential curriculum ---
+        _, arm_hi = self.cfg.arm_offset_range
+        ratio_sample = _sample_exponential_ratio(
+            self._curriculum_ratio,
+            (n, len(self._arm_local)),
+            self.device,
+        )
+        joint_ratio = ratio_sample * torch.rand(
+            n, len(self._arm_local), device=self.device
+        )
+        sign = torch.sign(
+            torch.rand(n, len(self._arm_local), device=self.device) - 0.5
+        )
+        arm_offsets = sign * joint_ratio * arm_hi
+        targets[:, self._arm_local] += arm_offsets
+
+        self._target_command[env_ids] = targets
+
+        steps = self._interp_steps
+        self._delta[env_ids] = (
+            self._target_command[env_ids] - self._body_command[env_ids]
+        ) / steps
+        self._interp_remaining[env_ids] = steps
+
+    def _update_command(self):
+        """Linearly interpolate command toward the sampled target."""
+        active = self._interp_remaining > 0
+        if active.any():
+            self._body_command[active] += self._delta[active]
+            self._interp_remaining[active] -= 1
+            finished = self._interp_remaining == 0
+            if finished.any():
+                self._body_command[finished] = self._target_command[finished]
+
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        """Create or toggle wrist target markers."""
+        if debug_vis:
+            if not hasattr(self, "_left_marker"):
+                self._left_marker = VisualizationMarkers(
+                    _LEFT_WRIST_MARKER_CFG
+                )
+                self._right_marker = VisualizationMarkers(
+                    _RIGHT_WRIST_MARKER_CFG
+                )
+            self._left_marker.set_visibility(True)
+            self._right_marker.set_visibility(True)
+        else:
+            if hasattr(self, "_left_marker"):
+                self._left_marker.set_visibility(False)
+                self._right_marker.set_visibility(False)
+
+    def _debug_vis_callback(self, event):
+        """Update marker positions from the robot's FK wrist body positions.
+
+        We show the *current* wrist positions so the user can verify
+        the robot is tracking toward the commanded joint targets.
+        """
+        if not self.robot.is_initialized:
+            return
+        left_pos = self.robot.data.body_pos_w[
+            :, self._left_wrist_idx, :3
+        ]
+        right_pos = self.robot.data.body_pos_w[
+            :, self._right_wrist_idx, :3
+        ]
+        # Reason: markers need quaternion orientation; use identity
+        default_quat = torch.tensor(
+            [1.0, 0.0, 0.0, 0.0], device=self.device
+        ).expand(self.num_envs, -1)
+        self._left_marker.visualize(left_pos, default_quat)
+        self._right_marker.visualize(right_pos, default_quat)
+
+
+@configclass
+class BodyPoseCommandCfg(CommandTermCfg):
+    """Configuration for the body pose command term.
+
+    Attributes:
+        asset_name: Name of the robot articulation in the scene.
+        joint_names: Regex patterns for ALL 29 body joints.
+        leg_joint_names: Regex patterns for leg joints.
+        waist_joint_names: Regex patterns for waist joints.
+        arm_joint_names: Regex patterns for arm joints.
+        leg_offset_range: Uniform offset range for legs (rad).
+        waist_offset_range: Uniform offset range for waist (rad).
+        arm_offset_range: Max offset range for arms (rad); scaled by curriculum.
+        initial_ratio: Starting curriculum ratio (0 = arms at default).
+        interpolation_duration: Time in seconds to interpolate to new target.
+        left_wrist_body_name: Body name for left wrist FK visualization.
+        right_wrist_body_name: Body name for right wrist FK visualization.
+    """
+
+    class_type: type = BodyPoseCommand
+    asset_name: str = "robot"
+
+    joint_names: list[str] = MISSING
+    leg_joint_names: list[str] = field(default_factory=lambda: [
+        ".*_hip_pitch_joint", ".*_hip_roll_joint", ".*_hip_yaw_joint",
+        ".*_knee_joint", ".*_ankle_pitch_joint", ".*_ankle_roll_joint",
+    ])
+    waist_joint_names: list[str] = field(default_factory=lambda: [
+        "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+    ])
+    arm_joint_names: list[str] = field(default_factory=lambda: [
+        ".*_shoulder_pitch_joint", ".*_shoulder_roll_joint",
+        ".*_shoulder_yaw_joint", ".*_elbow_joint",
+        ".*_wrist_roll_joint", ".*_wrist_pitch_joint",
+        ".*_wrist_yaw_joint",
+    ])
+
+    leg_offset_range: tuple[float, float] = (-0.05, 0.05)
+    waist_offset_range: tuple[float, float] = (-0.2, 0.2)
+    arm_offset_range: tuple[float, float] = (-0.5, 0.5)
+    initial_ratio: float = 0.0
+    interpolation_duration: float = 1.0
+
+    left_wrist_body_name: str = "left_wrist_yaw_link"
+    right_wrist_body_name: str = "right_wrist_yaw_link"
+
+    debug_vis: bool = True
