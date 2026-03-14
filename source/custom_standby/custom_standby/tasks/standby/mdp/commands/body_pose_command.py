@@ -5,9 +5,12 @@ with per-group offset ranges and OpenHomie-style exponential curriculum
 for the arm joints.  Legs are constrained to stay near the standing
 default; arms ramp up progressively.
 
-Wrist target positions are visualized as colored sphere markers
-(red = left, blue = right) via forward kinematics on the robot's
-current articulation data.
+Visualization: two pairs of sphere markers per environment:
+- Red / Blue (solid): *current* left / right wrist FK positions
+  (updates every render step — cheap, just reads body_pos_w).
+- Pink / Cyan (translucent): *target* left / right wrist FK positions
+  (updates only when a command is resampled — avoids expensive
+  write-joint-state-to-sim calls every step).
 """
 
 from __future__ import annotations
@@ -59,11 +62,12 @@ def _sample_exponential_ratio(
 # ---------------------------------------------------------------------------
 # Visualization marker configs
 # ---------------------------------------------------------------------------
-_LEFT_WRIST_MARKER_CFG = VisualizationMarkersCfg(
-    prim_path="/Visuals/LeftWristTarget",
+# Current wrist positions (solid, small)
+_LEFT_CURR_MARKER_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/LeftWristCurrent",
     markers={
         "sphere": sim_utils.SphereCfg(
-            radius=0.04,
+            radius=0.03,
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(1.0, 0.2, 0.2),
             ),
@@ -71,13 +75,40 @@ _LEFT_WRIST_MARKER_CFG = VisualizationMarkersCfg(
     },
 )
 
-_RIGHT_WRIST_MARKER_CFG = VisualizationMarkersCfg(
+_RIGHT_CURR_MARKER_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/RightWristCurrent",
+    markers={
+        "sphere": sim_utils.SphereCfg(
+            radius=0.03,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.2, 0.4, 1.0),
+            ),
+        ),
+    },
+)
+
+# Target wrist positions (larger, translucent)
+_LEFT_TARGET_MARKER_CFG = VisualizationMarkersCfg(
+    prim_path="/Visuals/LeftWristTarget",
+    markers={
+        "sphere": sim_utils.SphereCfg(
+            radius=0.05,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(1.0, 0.6, 0.6),
+                opacity=0.4,
+            ),
+        ),
+    },
+)
+
+_RIGHT_TARGET_MARKER_CFG = VisualizationMarkersCfg(
     prim_path="/Visuals/RightWristTarget",
     markers={
         "sphere": sim_utils.SphereCfg(
-            radius=0.04,
+            radius=0.05,
             visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.2, 0.4, 1.0),
+                diffuse_color=(0.6, 0.7, 1.0),
+                opacity=0.4,
             ),
         ),
     },
@@ -159,6 +190,15 @@ class BodyPoseCommand(CommandTerm):
             cfg.right_wrist_body_name
         )[0][0]
 
+        # Reason: cache target wrist positions so we only compute FK
+        # at resample time, not every render step.
+        self._target_left_pos_w = torch.zeros(
+            self.num_envs, 3, device=self.device
+        )
+        self._target_right_pos_w = torch.zeros(
+            self.num_envs, 3, device=self.device
+        )
+
     def __str__(self) -> str:
         """Return string representation."""
         msg = "BodyPoseCommand:\n"
@@ -215,13 +255,10 @@ class BodyPoseCommand(CommandTerm):
             (n, len(self._arm_local)),
             self.device,
         )
-        joint_ratio = ratio_sample * torch.rand(
-            n, len(self._arm_local), device=self.device
-        )
         sign = torch.sign(
             torch.rand(n, len(self._arm_local), device=self.device) - 0.5
         )
-        arm_offsets = sign * joint_ratio * arm_hi
+        arm_offsets = sign * ratio_sample * arm_hi
         targets[:, self._arm_local] += arm_offsets
 
         self._target_command[env_ids] = targets
@@ -231,6 +268,31 @@ class BodyPoseCommand(CommandTerm):
             self._target_command[env_ids] - self._body_command[env_ids]
         ) / steps
         self._interp_remaining[env_ids] = steps
+
+        # Compute target wrist FK once at resample time (not every step).
+        # Temporarily write target joints, read body_pos_w, restore.
+        if self.cfg.debug_vis and hasattr(self, "_left_target_marker"):
+            original_pos = self.robot.data.joint_pos[env_ids].clone()
+            self.robot.data.joint_pos[env_ids][:, self._all_ids] = targets
+            self.robot.write_joint_state_to_sim(
+                self.robot.data.joint_pos, self.robot.data.joint_vel
+            )
+            self.robot.update(dt=0.0)
+
+            self._target_left_pos_w[env_ids] = (
+                self.robot.data.body_pos_w[env_ids, self._left_wrist_idx, :3]
+                .clone()
+            )
+            self._target_right_pos_w[env_ids] = (
+                self.robot.data.body_pos_w[env_ids, self._right_wrist_idx, :3]
+                .clone()
+            )
+
+            self.robot.data.joint_pos[env_ids] = original_pos
+            self.robot.write_joint_state_to_sim(
+                self.robot.data.joint_pos, self.robot.data.joint_vel
+            )
+            self.robot.update(dt=0.0)
 
     def _update_command(self):
         """Linearly interpolate command toward the sampled target."""
@@ -243,42 +305,62 @@ class BodyPoseCommand(CommandTerm):
                 self._body_command[finished] = self._target_command[finished]
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        """Create or toggle wrist target markers."""
+        """Create or toggle wrist markers (current + target)."""
         if debug_vis:
-            if not hasattr(self, "_left_marker"):
-                self._left_marker = VisualizationMarkers(
-                    _LEFT_WRIST_MARKER_CFG
+            if not hasattr(self, "_left_curr_marker"):
+                self._left_curr_marker = VisualizationMarkers(
+                    _LEFT_CURR_MARKER_CFG
                 )
-                self._right_marker = VisualizationMarkers(
-                    _RIGHT_WRIST_MARKER_CFG
+                self._right_curr_marker = VisualizationMarkers(
+                    _RIGHT_CURR_MARKER_CFG
                 )
-            self._left_marker.set_visibility(True)
-            self._right_marker.set_visibility(True)
+                self._left_target_marker = VisualizationMarkers(
+                    _LEFT_TARGET_MARKER_CFG
+                )
+                self._right_target_marker = VisualizationMarkers(
+                    _RIGHT_TARGET_MARKER_CFG
+                )
+            self._left_curr_marker.set_visibility(True)
+            self._right_curr_marker.set_visibility(True)
+            self._left_target_marker.set_visibility(True)
+            self._right_target_marker.set_visibility(True)
         else:
-            if hasattr(self, "_left_marker"):
-                self._left_marker.set_visibility(False)
-                self._right_marker.set_visibility(False)
+            if hasattr(self, "_left_curr_marker"):
+                self._left_curr_marker.set_visibility(False)
+                self._right_curr_marker.set_visibility(False)
+                self._left_target_marker.set_visibility(False)
+                self._right_target_marker.set_visibility(False)
 
     def _debug_vis_callback(self, event):
-        """Update marker positions from the robot's FK wrist body positions.
+        """Update wrist markers — current (cheap) + cached target.
 
-        We show the *current* wrist positions so the user can verify
-        the robot is tracking toward the commanded joint targets.
+        Current wrist positions: read directly from body_pos_w (no cost).
+        Target wrist positions: cached at resample time (no per-step FK).
         """
         if not self.robot.is_initialized:
             return
-        left_pos = self.robot.data.body_pos_w[
-            :, self._left_wrist_idx, :3
-        ]
-        right_pos = self.robot.data.body_pos_w[
-            :, self._right_wrist_idx, :3
-        ]
-        # Reason: markers need quaternion orientation; use identity
+
         default_quat = torch.tensor(
             [1.0, 0.0, 0.0, 0.0], device=self.device
         ).expand(self.num_envs, -1)
-        self._left_marker.visualize(left_pos, default_quat)
-        self._right_marker.visualize(right_pos, default_quat)
+
+        # Current wrist positions (solid red/blue — fast read)
+        left_curr = self.robot.data.body_pos_w[
+            :, self._left_wrist_idx, :3
+        ]
+        right_curr = self.robot.data.body_pos_w[
+            :, self._right_wrist_idx, :3
+        ]
+        self._left_curr_marker.visualize(left_curr, default_quat)
+        self._right_curr_marker.visualize(right_curr, default_quat)
+
+        # Target wrist positions (translucent pink/cyan — cached)
+        self._left_target_marker.visualize(
+            self._target_left_pos_w, default_quat
+        )
+        self._right_target_marker.visualize(
+            self._target_right_pos_w, default_quat
+        )
 
 
 @configclass

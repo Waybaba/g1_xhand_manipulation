@@ -36,7 +36,7 @@ python scripts/export_deploy.py --run <run_name>
 # Deploy to MuJoCo
 cd ~/Desktop/xhand_manip_ws
 source /opt/ros/humble/setup.bash && source install/setup.bash
-ros2 launch g1_xhand_description mujoco.launch.py use_rl_policy:=true
+ros2 launch xhand_manip_controller mujoco.launch.py use_rl_policy:=true
 ```
 
 ## Observation Space (122 dims)

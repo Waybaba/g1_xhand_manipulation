@@ -99,7 +99,7 @@ _DEFAULT_POS = {
     "left_hip_pitch_joint": -0.312, "right_hip_pitch_joint": -0.312,
     "left_knee_joint": 0.669, "right_knee_joint": 0.669,
     "left_ankle_pitch_joint": -0.363, "right_ankle_pitch_joint": -0.363,
-    "left_elbow_joint": 1.28, "right_elbow_joint": 1.28,
+    "left_elbow_joint": 0.6, "right_elbow_joint": 0.6,
     "left_shoulder_roll_joint": 0.2, "right_shoulder_roll_joint": -0.2,
     "left_shoulder_pitch_joint": 0.2, "right_shoulder_pitch_joint": 0.2,
 }
@@ -332,13 +332,16 @@ def main():
         obs_names = [
             "base_ang_vel",
             "projected_gravity",
-            "body_pose_commands",
+            "body_pose_targets",
             "joint_pos",
             "joint_vel",
             "actions",
         ]
         obs_history = [1, 1, 1, 1, 1, 1]
-        cmd_names = ["body_pose"]
+        # Reason: command_names left empty — body_pose_targets is handled
+        # entirely as a custom ObservationTerm in XhandManipController,
+        # avoiding base class CommandManager issues.
+        cmd_names = []
 
     deploy_model.eval()
 
@@ -396,7 +399,7 @@ def main():
         dest = os.path.join(
             ws_root,
             "src",
-            "g1_xhand_description",
+            "xhand_manip_controller",
             "config",
             "policies",
             "standby_policy.onnx",

@@ -116,7 +116,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Copy exported ONNX to deployment location
     import shutil
     ws_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    deploy_dest = os.path.join(ws_root, "src", "g1_xhand_description", "config", "policies", "standby_policy.onnx")
+    deploy_dest = os.path.join(ws_root, "src", "xhand_manip_controller", "config", "policies", "standby_policy.onnx")
     os.makedirs(os.path.dirname(deploy_dest), exist_ok=True)
     shutil.copy2(os.path.join(export_model_dir, "policy.onnx"), deploy_dest)
     print(f"[INFO] Copied ONNX to deployment: {deploy_dest}")

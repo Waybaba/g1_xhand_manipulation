@@ -68,7 +68,7 @@ G1_CYLINDER_CFG = ArticulationCfg(
             ".*_hip_pitch_joint": -0.312,
             ".*_knee_joint": 0.669,
             ".*_ankle_pitch_joint": -0.363,
-            ".*_elbow_joint": 1.28,
+            ".*_elbow_joint": 0.6,
             "left_shoulder_roll_joint": 0.2,
             "left_shoulder_pitch_joint": 0.2,
             "right_shoulder_roll_joint": -0.2,

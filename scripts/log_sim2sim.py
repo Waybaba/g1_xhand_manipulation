@@ -1,7 +1,7 @@
 """Log joint states during MuJoCo sim2sim deployment.
 
 Records /joint_states and prints diagnostic info every 0.5s.
-Run alongside: ros2 launch g1_xhand_description mujoco.launch.py use_rl_policy:=true
+Run alongside: ros2 launch xhand_manip_controller mujoco.launch.py use_rl_policy:=true
 
 Usage:
     python scripts/log_sim2sim.py [--duration 10]

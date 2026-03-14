@@ -1,14 +1,23 @@
 """G1 XHand standby controller environment configuration.
 
 Trains a 29-DOF policy to maintain an upright standing pose while
-tracking arbitrary body joint position commands (FK mode).  Key
-differences from the locomotion environment:
+tracking arbitrary body joint position commands.  Key design:
 
 1. No velocity commands or locomotion rewards.
 2. Flat ground with dark sky — no terrain generator.
-3. Body pose command replaces velocity + arm target commands.
-4. Rewards focus on pose tracking, upright stability, and stillness.
-5. XHand mass randomization for payload adaptation.
+3. BodyPoseCommand: joint-space targets for all 29 DOFs with
+   OpenHomie-style exponential arm curriculum.
+4. Joint tracking rewards (L1 + tanh fine-grained bonus).
+5. Wrist FK target visualization (sphere markers show where
+   the target joint configuration places the wrists).
+6. XHand mass randomization for payload adaptation.
+
+Observation layout matches locomotion for sim2sim compatibility:
+  base_ang_vel(3) + projected_gravity(3) + body_pose_commands(29)
+  + joint_pos(29) + joint_vel(29) + actions(29) = 122 dims.
+
+At deployment, IK can be computed externally and fed as joint
+commands — the policy just tracks whatever joint targets it receives.
 """
 
 import isaaclab.sim as sim_utils
@@ -44,8 +53,9 @@ G1_BODY_JOINT_NAMES = [
 
 @configclass
 class G1StandbyObservationsCfg(BaseObservationsCfg):
-    """Standby observations — no velocity commands, body pose targets instead.
+    """Standby observations — joint-space body pose commands.
 
+    Matches the locomotion policy layout for sim2sim compatibility.
     Policy obs: 3+3+29+29+29+29 = 122 dims.
     Critic obs: above + 3 (base_lin_vel) = 125 dims.
     """
@@ -140,19 +150,17 @@ class StandbyActionsCfg(BaseActionsCfg):
 
 @configclass
 class G1StandbyRewards(RewardsCfg):
-    """Standby reward set — no locomotion, focused on pose tracking.
+    """Standby reward set — joint-space pose tracking + balance.
 
-    Key rewards:
-    - joint_target_tracking: L1 error against commanded body pose
-    - upright: penalize tilt from vertical
-    - base_stillness: penalize lateral base movement
-    - feet_contact: reward both feet on ground
+    Balance comes from L2 penalties (upright, base_height, velocity)
+    plus positive survival signals (alive, feet_contact).
+    Arm tracking is the primary task signal via L1 error + tanh bonus.
     """
 
-    # -- task: body pose tracking --
+    # -- task: body pose tracking (L1 penalty + tanh bonus) --
     joint_target_tracking = RewTerm(
         func=mdp.body_target_tracking,
-        weight=-1.0,
+        weight=-2.0,
         params={
             "command_name": "body_targets",
             "asset_cfg": SceneEntityCfg(
@@ -160,10 +168,21 @@ class G1StandbyRewards(RewardsCfg):
             ),
         },
     )
+    joint_target_tracking_fine = RewTerm(
+        func=mdp.body_target_tracking_tanh,
+        weight=1.0,
+        params={
+            "command_name": "body_targets",
+            "asset_cfg": SceneEntityCfg(
+                "robot", joint_names=G1_BODY_JOINT_NAMES,
+            ),
+            "std": 0.5,
+        },
+    )
 
-    alive = RewTerm(func=mdp.is_alive, weight=0.15)
+    alive = RewTerm(func=mdp.is_alive, weight=2.0)
 
-    # -- base stability --
+    # -- base stability penalties --
     upright = RewTerm(func=mdp.upward, weight=-5.0)
     base_height = RewTerm(
         func=mdp.base_height_l2,
@@ -223,7 +242,7 @@ class G1StandbyRewards(RewardsCfg):
     # -- feet --
     feet_contact = RewTerm(
         func=mdp.feet_contact_reward,
-        weight=0.5,
+        weight=2.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces", body_names=".*ankle_roll.*"
@@ -261,8 +280,9 @@ class G1StandbyRewards(RewardsCfg):
 class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
     """G1 XHand standby controller environment.
 
-    Flat ground, dark sky, no locomotion rewards.  Body pose command
-    with OpenHomie arm curriculum.  XHand mass randomization.
+    Flat ground, dark sky, no locomotion rewards.  Joint-space body pose
+    command with OpenHomie arm curriculum.  Wrist FK target visualization.
+    XHand mass randomization for payload adaptation.
     """
 
     observations: G1StandbyObservationsCfg = G1StandbyObservationsCfg()
@@ -296,9 +316,9 @@ class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.sim.physx.gpu_max_rigid_contact_count = 2**24
         self.sim.physx.gpu_max_rigid_patch_count = 2**24
 
-        # =====================================================================
+        # =============================================================
         # Domain randomization
-        # =====================================================================
+        # =============================================================
 
         # Friction
         self.events.physics_material = EventTerm(
@@ -323,7 +343,8 @@ class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
         )
         self.events.add_base_mass.params["operation"] = "add"
 
-        # XHand mass randomization (-1 to 3 kg on wrist links)
+        # Wrist mass randomization — absolute range covers different hand
+        # weights (lighter grippers to heavy xhands with payload).
         self.events.randomize_xhand_mass = EventTerm(
             func=mdp.randomize_rigid_body_mass,
             mode="startup",
@@ -331,8 +352,8 @@ class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
                 "asset_cfg": SceneEntityCfg(
                     "robot", body_names=[".*_wrist_yaw_link"]
                 ),
-                "mass_distribution_params": (-1.0, 3.0),
-                "operation": "add",
+                "mass_distribution_params": (0.1, 3.0),
+                "operation": "abs",
                 "recompute_inertia": True,
             },
         )
@@ -366,55 +387,35 @@ class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         )
 
-        # External force/torque on torso
+        # Moderate external force on torso (reduced from ±5/±3 to ease
+        # initial standing learning)
         self.events.base_external_force_torque.params[
             "asset_cfg"
         ].body_names = ["torso_link"]
         self.events.base_external_force_torque.params["force_range"] = (
-            -5.0,
-            5.0,
+            -2.0,
+            2.0,
         )
         self.events.base_external_force_torque.params["torque_range"] = (
-            -3.0,
-            3.0,
+            -1.0,
+            1.0,
         )
 
-        # Light pushes (standby — less aggressive than locomotion)
-        self.events.push_robot.interval_range_s = (2.0, 5.0)
+        # Reason: gentle pushes let the policy learn to stand first;
+        # disturbance robustness can be increased via curriculum later.
+        self.events.push_robot.interval_range_s = (5.0, 15.0)
         self.events.push_robot.params["velocity_range"] = {
-            "x": (-0.5, 0.5),
-            "y": (-0.5, 0.5),
-            "z": (-0.2, 0.2),
-            "roll": (-0.3, 0.3),
-            "pitch": (-0.3, 0.3),
-            "yaw": (-0.5, 0.5),
+            "x": (-0.3, 0.3),
+            "y": (-0.3, 0.3),
+            "z": (-0.1, 0.1),
+            "roll": (-0.15, 0.15),
+            "pitch": (-0.15, 0.15),
+            "yaw": (-0.3, 0.3),
         }
 
-        # External force on wrists (payload disturbance, from loco-manipulation)
-        self.events.left_hand_force = EventTerm(
-            func=mdp.apply_external_force_torque,
-            mode="interval",
-            interval_range_s=(5.0, 10.0),
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot", body_names="left_wrist_yaw_link"
-                ),
-                "force_range": (-10.0, 10.0),
-                "torque_range": (-1.0, 1.0),
-            },
-        )
-        self.events.right_hand_force = EventTerm(
-            func=mdp.apply_external_force_torque,
-            mode="interval",
-            interval_range_s=(5.0, 10.0),
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot", body_names="right_wrist_yaw_link"
-                ),
-                "force_range": (-10.0, 10.0),
-                "torque_range": (-1.0, 1.0),
-            },
-        )
+        # Disable wrist forces initially — they destabilize early training
+        self.events.left_hand_force = None
+        self.events.right_hand_force = None
 
         # Reset with small perturbations
         self.events.reset_robot_joints.params["position_range"] = (
@@ -437,36 +438,34 @@ class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
             },
         }
 
-        # =====================================================================
-        # Commands: body pose targets (FK mode, no velocity commands)
-        # =====================================================================
-        # Reason: override the inherited base_velocity command with None
-        # to disable it, and set our body pose command instead
+        # =============================================================
+        # Commands: joint-space body pose targets with arm curriculum
+        # =============================================================
         self.commands.base_velocity = None
         self.commands.body_targets = mdp.BodyPoseCommandCfg(
             asset_name="robot",
-            resampling_time_range=(1.0, 1.0),
+            resampling_time_range=(1.0, 3.0),
             joint_names=G1_BODY_JOINT_NAMES,
             leg_offset_range=(-0.05, 0.05),
             waist_offset_range=(-0.2, 0.2),
-            arm_offset_range=(-0.5, 0.5),
+            arm_offset_range=(-0.8, 0.8),
             initial_ratio=0.0,
             interpolation_duration=1.0,
             debug_vis=True,
         )
 
-        # =====================================================================
-        # Curriculum
-        # =====================================================================
+        # =============================================================
+        # Curriculum: survival-gated arm command progression
+        # =============================================================
         self.curriculum.terrain_levels = None
         self.curriculum.arm_cmd_levels = CurrTerm(
             func=mdp.arm_cmd_levels,
-            params={"threshold_ratio": 0.6},
+            params={"step_size": 0.002, "min_mean_ep_buf": 400.0},
         )
 
-        # =====================================================================
+        # =============================================================
         # Terminations
-        # =====================================================================
+        # =============================================================
         self.terminations.base_contact.params[
             "sensor_cfg"
         ].body_names = "torso_link"
@@ -492,3 +491,7 @@ class G1StandbyEnvCfg_PLAY(G1StandbyEnvCfg):
         self.observations.policy.enable_corruption = False
         self.events.base_external_force_torque = None
         self.events.push_robot = None
+
+        # Reason: no curriculum runs during play, so set full arm range
+        # directly so the policy is tested with diverse targets.
+        self.commands.body_targets.initial_ratio = 1.0

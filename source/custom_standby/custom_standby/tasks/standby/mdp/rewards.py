@@ -39,6 +39,34 @@ def body_target_tracking(
     return torch.sum(torch.abs(actual_pos - targets), dim=1)
 
 
+def body_target_tracking_tanh(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    std: float = 0.5,
+) -> torch.Tensor:
+    """Fine-grained tanh reward for body pose tracking.
+
+    Mirrors the reach task's ``position_command_error_tanh`` pattern:
+    returns ``1 - tanh(error / std)`` so the policy gets shaped gradient
+    signal when it's close to the target.  Pair with a positive weight.
+
+    Args:
+        env: The RL environment instance.
+        command_name: Name of the body pose command term.
+        asset_cfg: Scene entity config with the 29 body joint IDs.
+        std: Standard deviation for the tanh kernel (smaller = sharper).
+
+    Returns:
+        torch.Tensor: Per-environment reward in [0, 1].
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    targets = env.command_manager.get_command(command_name)
+    actual_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    error = torch.sum(torch.abs(actual_pos - targets), dim=1)
+    return 1.0 - torch.tanh(error / std)
+
+
 def base_xy_vel_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
@@ -64,15 +92,70 @@ def upward(
 ) -> torch.Tensor:
     """Penalize deviation from upright orientation.
 
+    projected_gravity_b[:, 2] = -1 when upright (gravity points down
+    in body frame).  (1 + z)^2 = 0 when upright, 4 when inverted.
+
     Args:
         env: The RL environment instance.
         asset_cfg: Scene entity configuration for the robot.
 
     Returns:
-        torch.Tensor: Per-environment upward penalty.
+        torch.Tensor: Per-environment upward penalty (0 when upright).
     """
     asset: RigidObject = env.scene[asset_cfg.name]
-    return torch.square(1 - asset.data.projected_gravity_b[:, 2])
+    return torch.square(1 + asset.data.projected_gravity_b[:, 2])
+
+
+def upright_exp(
+    env: ManagerBasedRLEnv,
+    std: float = 0.25,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Continuous positive reward for being upright (exponential kernel).
+
+    Returns exp(-||proj_gravity_xy||^2 / std^2).  Gives +1.0 when
+    perfectly vertical, smoothly decaying as tilt increases.
+
+    Args:
+        env: The RL environment instance.
+        std: Width of the exponential kernel (smaller = sharper).
+        asset_cfg: Scene entity configuration for the robot.
+
+    Returns:
+        torch.Tensor: Per-environment reward in (0, 1].
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    # Reason: projected_gravity_b is [0,0,-1] when upright; xy components
+    # measure tilt magnitude — using them as error keeps the kernel centred.
+    grav_xy_sq = torch.sum(
+        torch.square(asset.data.projected_gravity_b[:, :2]), dim=1
+    )
+    return torch.exp(-grav_xy_sq / (std * std))
+
+
+def stillness_exp(
+    env: ManagerBasedRLEnv,
+    std: float = 0.25,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Continuous positive reward for having near-zero base xy velocity.
+
+    Returns exp(-||lin_vel_xy||^2 / std^2).  Gives +1.0 when
+    perfectly still, decaying as lateral velocity increases.
+
+    Args:
+        env: The RL environment instance.
+        std: Width of the exponential kernel (smaller = sharper).
+        asset_cfg: Scene entity configuration for the robot.
+
+    Returns:
+        torch.Tensor: Per-environment reward in (0, 1].
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    vel_xy_sq = torch.sum(
+        torch.square(asset.data.root_lin_vel_b[:, :2]), dim=1
+    )
+    return torch.exp(-vel_xy_sq / (std * std))
 
 
 def energy(

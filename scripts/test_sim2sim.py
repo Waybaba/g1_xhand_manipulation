@@ -24,11 +24,11 @@ import onnxruntime as ort
 POLICY_HZ = 50.0
 MJCF_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "..",
-    "src", "g1_xhand_description", "mjcf", "g1_xhand.xml",
+    "src", "xhand_manip_controller", "mjcf", "g1_xhand.xml",
 )
 POLICY_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "..",
-    "src", "g1_xhand_description", "config", "policies", "policy.onnx",
+    "src", "xhand_manip_controller", "config", "policies", "policy.onnx",
 )
 
 
