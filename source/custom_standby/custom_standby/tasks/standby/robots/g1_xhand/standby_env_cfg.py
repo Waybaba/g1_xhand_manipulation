@@ -222,7 +222,7 @@ class G1StandbyRewards(RewardsCfg):
             ),
         },
     )
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.10)
     dof_pos_limits = RewTerm(
         func=mdp.joint_pos_limits,
         weight=-5.0,
@@ -448,6 +448,7 @@ class G1StandbyEnvCfg(LocomotionVelocityRoughEnvCfg):
             joint_names=G1_BODY_JOINT_NAMES,
             leg_offset_range=(-0.05, 0.05),
             waist_offset_range=(-0.2, 0.2),
+            waist_yaw_offset_range=(-1.0, 1.0),
             arm_offset_range=(-0.8, 0.8),
             initial_ratio=0.0,
             interpolation_duration=1.0,

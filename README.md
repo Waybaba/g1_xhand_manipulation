@@ -30,6 +30,13 @@ python scripts/rsl_rl/train.py --task Custom-Standby-G1-v0 --num_envs 16
 # Full training (4096 envs, headless)
 python scripts/rsl_rl/train.py --task Custom-Standby-G1-v0 --headless
 
+# Full training with wandb logging (standby + waist_yaw, 4096 envs)
+python scripts/rsl_rl/train.py --task Custom-Standby-G1-v0 --headless \
+    --num_envs 4096 \
+    --run_name standby_v10_waist_yaw \
+    --logger wandb \
+    --log_project_name g1_standby
+
 # Export ONNX
 python scripts/export_deploy.py --run <run_name>
 

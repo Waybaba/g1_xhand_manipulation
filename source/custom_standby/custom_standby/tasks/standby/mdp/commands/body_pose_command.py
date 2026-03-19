@@ -118,10 +118,11 @@ _RIGHT_TARGET_MARKER_CFG = VisualizationMarkersCfg(
 class BodyPoseCommand(CommandTerm):
     """Command generating random body joint position targets.
 
-    Targets are split into three groups with independent offset ranges:
+    Targets are split into four groups with independent offset ranges:
 
     * **Legs** -- tight range near standing default for balance stability.
-    * **Waist** -- moderate range for torso posture variation.
+    * **Waist roll/pitch** -- moderate range for torso posture variation.
+    * **Waist yaw** -- curriculum-controlled like arms (larger range).
     * **Arms** -- OpenHomie exponential curriculum that ramps from zero
       to the full ``arm_offset_range``.
 
@@ -147,12 +148,14 @@ class BodyPoseCommand(CommandTerm):
 
         self._leg_ids, _ = self.robot.find_joints(cfg.leg_joint_names)
         self._waist_ids, _ = self.robot.find_joints(cfg.waist_joint_names)
+        self._waist_yaw_ids, _ = self.robot.find_joints(cfg.waist_yaw_joint_names)
         self._arm_ids, _ = self.robot.find_joints(cfg.arm_joint_names)
 
         # Remap to local indices within self._all_ids
         all_set = list(self._all_ids)
         self._leg_local = [all_set.index(i) for i in self._leg_ids]
         self._waist_local = [all_set.index(i) for i in self._waist_ids]
+        self._waist_yaw_local = [all_set.index(i) for i in self._waist_yaw_ids]
         self._arm_local = [all_set.index(i) for i in self._arm_ids]
 
         self._default_pos = (
@@ -205,6 +208,7 @@ class BodyPoseCommand(CommandTerm):
         msg += f"\tJoints ({self._num_cmd}): {self._all_names}\n"
         msg += f"\tLeg offset: {self.cfg.leg_offset_range}\n"
         msg += f"\tWaist offset: {self.cfg.waist_offset_range}\n"
+        msg += f"\tWaist yaw offset: {self.cfg.waist_yaw_offset_range}\n"
         msg += f"\tArm offset: {self.cfg.arm_offset_range}\n"
         msg += f"\tInterpolation: {self.cfg.interpolation_duration}s "
         msg += f"({self._interp_steps} steps)\n"
@@ -241,12 +245,24 @@ class BodyPoseCommand(CommandTerm):
         ) + lo
         targets[:, self._leg_local] += leg_offsets
 
-        # --- Waist: moderate uniform offsets ---
+        # --- Waist roll/pitch: moderate uniform offsets ---
         lo, hi = self.cfg.waist_offset_range
         waist_offsets = (hi - lo) * torch.rand(
             n, len(self._waist_local), device=self.device
         ) + lo
         targets[:, self._waist_local] += waist_offsets
+
+        # --- Waist yaw: curriculum-controlled exponential (like WBC) ---
+        _, wyaw_hi = self.cfg.waist_yaw_offset_range
+        wyaw_ratio = _sample_exponential_ratio(
+            self._curriculum_ratio,
+            (n, len(self._waist_yaw_local)),
+            self.device,
+        )
+        wyaw_sign = torch.sign(
+            torch.rand(n, len(self._waist_yaw_local), device=self.device) - 0.5
+        )
+        targets[:, self._waist_yaw_local] += wyaw_sign * wyaw_ratio * wyaw_hi
 
         # --- Arms: OpenHomie exponential curriculum ---
         _, arm_hi = self.cfg.arm_offset_range
@@ -371,10 +387,12 @@ class BodyPoseCommandCfg(CommandTermCfg):
         asset_name: Name of the robot articulation in the scene.
         joint_names: Regex patterns for ALL 29 body joints.
         leg_joint_names: Regex patterns for leg joints.
-        waist_joint_names: Regex patterns for waist joints.
+        waist_joint_names: Regex patterns for waist roll/pitch joints.
+        waist_yaw_joint_names: Regex patterns for waist yaw joint.
         arm_joint_names: Regex patterns for arm joints.
         leg_offset_range: Uniform offset range for legs (rad).
-        waist_offset_range: Uniform offset range for waist (rad).
+        waist_offset_range: Uniform offset range for waist roll/pitch (rad).
+        waist_yaw_offset_range: Max offset range for waist yaw (rad); curriculum-scaled.
         arm_offset_range: Max offset range for arms (rad); scaled by curriculum.
         initial_ratio: Starting curriculum ratio (0 = arms at default).
         interpolation_duration: Time in seconds to interpolate to new target.
@@ -391,7 +409,10 @@ class BodyPoseCommandCfg(CommandTermCfg):
         ".*_knee_joint", ".*_ankle_pitch_joint", ".*_ankle_roll_joint",
     ])
     waist_joint_names: list[str] = field(default_factory=lambda: [
-        "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
+        "waist_roll_joint", "waist_pitch_joint",
+    ])
+    waist_yaw_joint_names: list[str] = field(default_factory=lambda: [
+        "waist_yaw_joint",
     ])
     arm_joint_names: list[str] = field(default_factory=lambda: [
         ".*_shoulder_pitch_joint", ".*_shoulder_roll_joint",
@@ -402,6 +423,7 @@ class BodyPoseCommandCfg(CommandTermCfg):
 
     leg_offset_range: tuple[float, float] = (-0.05, 0.05)
     waist_offset_range: tuple[float, float] = (-0.2, 0.2)
+    waist_yaw_offset_range: tuple[float, float] = (-1.0, 1.0)
     arm_offset_range: tuple[float, float] = (-0.5, 0.5)
     initial_ratio: float = 0.0
     interpolation_duration: float = 1.0

@@ -57,7 +57,7 @@ def arm_cmd_levels(
     if abs(command_term._curriculum_ratio - _LAST_PRINTED_RATIO) > 0.005:
         _LAST_PRINTED_RATIO = command_term._curriculum_ratio
         print(
-            f"[Curriculum] arm_cmd_levels={command_term._curriculum_ratio:.3f}"
+            f"[Curriculum] arm+waist_yaw cmd_levels={command_term._curriculum_ratio:.3f}"
             f"  global_mean_ep_buf={global_mean_ep_len:.1f}"
             f"  threshold={min_mean_ep_buf}"
         )

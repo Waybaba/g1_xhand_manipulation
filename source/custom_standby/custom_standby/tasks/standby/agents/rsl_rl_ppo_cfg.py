@@ -1,24 +1,32 @@
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlMLPModelCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
 class G1StandbyPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """PPO config for the custom G1 standby controller task."""
+    """PPO config for the custom G1 standby controller task (rsl-rl >= 5.0)."""
 
     num_steps_per_env = 24
     max_iterations = 50000
     save_interval = 100
     experiment_name = "custom_g1_standby"
-    empirical_normalization = True
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
-        noise_std_type="log",
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
+    obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
         activation="elu",
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
+            init_std=1.0, std_type="log",
+        ),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
     )
     clip_actions = 100.0
     algorithm = RslRlPpoAlgorithmCfg(

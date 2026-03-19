@@ -261,10 +261,31 @@ def main():
 
     print(f"Loading checkpoint: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    sd = ckpt["model_state_dict"]
 
-    in_dim = sd["actor.0.weight"].shape[1]
-    out_dim = sd["actor.6.weight"].shape[0]
+    # rsl-rl 5.x uses actor_state_dict (mlp.); older uses model_state_dict (actor.)
+    if "actor_state_dict" in ckpt:
+        sd = ckpt["actor_state_dict"]
+        mlp_prefix = "mlp."
+        norm_key = "obs_normalizer._mean"
+    elif "model_state_dict" in ckpt:
+        sd = ckpt["model_state_dict"]
+        mlp_prefix = "actor."
+        norm_key = "actor_obs_normalizer._mean"
+    elif "state_dict" in ckpt:
+        sd = ckpt["state_dict"]
+        mlp_prefix = "actor."
+        norm_key = "actor_obs_normalizer._mean"
+    else:
+        keys = list(ckpt.keys())
+        raise KeyError(
+            f"Checkpoint has neither 'actor_state_dict' nor 'model_state_dict' "
+            f"nor 'state_dict'. Available keys: {keys}"
+        )
+
+    first_weight = f"{mlp_prefix}0.weight"
+    last_weight = f"{mlp_prefix}6.weight"
+    in_dim = sd[first_weight].shape[1]
+    out_dim = sd[last_weight].shape[0]
     print(f"Actor: {in_dim} -> [512, 256, 128] -> {out_dim}")
 
     assert in_dim == EXPECTED_OBS, (
@@ -284,18 +305,17 @@ def main():
         nn.Linear(128, out_dim),
     )
     actor_sd = {
-        k.replace("actor.", ""): v
+        k.replace(mlp_prefix, ""): v
         for k, v in sd.items()
-        if k.startswith("actor.")
+        if k.startswith(mlp_prefix)
     }
     actor.load_state_dict(actor_sd)
     actor.eval()
 
     normalizer = None
-    norm_key = "actor_obs_normalizer._mean"
     if norm_key in sd:
-        norm_mean = sd["actor_obs_normalizer._mean"]
-        norm_var = sd["actor_obs_normalizer._var"]
+        norm_mean = sd[norm_key]
+        norm_var = sd[norm_key.replace("_mean", "_var")]
         normalizer = EmpiricalNormalizer(in_dim)
         normalizer.mean.copy_(norm_mean.squeeze())
         normalizer.var.copy_(norm_var.squeeze())
