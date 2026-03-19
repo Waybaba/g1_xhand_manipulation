@@ -60,7 +60,6 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # Import extensions to set up environment tasks
 import custom_standby.tasks  # noqa: F401
 from custom_standby.utils.exporter import attach_onnx_metadata
-from isaaclab_rl.rsl_rl import export_policy_as_onnx
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -112,8 +111,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
 
-    normalizer = getattr(ppo_runner, "obs_normalizer", None)
-    export_policy_as_onnx(ppo_runner.alg.policy, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    ppo_runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
     attach_onnx_metadata(env.unwrapped, resume_path, export_model_dir)
 
     # Copy exported ONNX to deployment location

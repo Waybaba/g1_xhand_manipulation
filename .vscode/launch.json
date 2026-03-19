@@ -71,8 +71,8 @@
         "16",
         "--load_run",
         "standby_v10_waist_yaw",
-        "--checkpoint",
-        "model_1500.pt"
+        // "--checkpoint",
+        // "model_.pt"
       ]
     }
   ]
