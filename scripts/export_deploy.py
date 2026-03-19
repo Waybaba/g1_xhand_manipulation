@@ -352,7 +352,7 @@ def main():
         obs_names = [
             "base_ang_vel",
             "projected_gravity",
-            "body_pose_targets",
+            "body_pose_commands",
             "joint_pos",
             "joint_vel",
             "actions",
