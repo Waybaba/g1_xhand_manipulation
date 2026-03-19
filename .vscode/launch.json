@@ -1,0 +1,79 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "RSL-RL: Train Test (16 envs, GUI)",
+      "env": { "DISPLAY": ":1" },
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/rsl_rl/train.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "--task",
+        "Custom-Standby-G1-v0",
+        "--num_envs",
+        "16"
+      ]
+    },
+    {
+      "name": "RSL-RL: Train Full (4096 envs, Headless)",
+      "env": { "DISPLAY": ":1" },
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/rsl_rl/train.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "--task",
+        "Custom-Standby-G1-v0",
+        "--headless"
+      ]
+    },
+    {
+      "name": "RSL-RL: Train Full + W&B",
+      "env": { "DISPLAY": ":1" },
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/rsl_rl/train.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "--task",
+        "Custom-Standby-G1-v0",
+        "--headless",
+        "--num_envs",
+        "4096",
+        "--run_name",
+        "standby_v10_waist_yaw",
+        "--logger",
+        "wandb",
+        "--log_project_name",
+        "g1_standby"
+      ]
+    },
+    {
+      "name": "RSL-RL: Play Checkpoint (16 envs)",
+      "env": { "DISPLAY": ":1" },
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/rsl_rl/play.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": [
+        "--task",
+        "Custom-Standby-G1-Play-v0",
+        "--num_envs",
+        "16",
+        "--load_run",
+        "standby_v10_waist_yaw",
+        "--checkpoint",
+        "model_1500.pt"
+      ]
+    }
+  ]
+}
